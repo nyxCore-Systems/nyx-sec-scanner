@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.1] — 2026-05-19
+
+### Added
+
+- **Email attachments**: when `--notify-email` / `SEC_SCAN_NOTIFY_EMAIL` is configured, the markdown report, JSON sidecar, and SHA-256 fingerprint are attached to the notification mail instead of being referenced only by host-local path.
+  - `msmtp` / `sendmail` path: proper RFC 2045 `multipart/mixed` MIME body, base64-encoded attachments wrapped at 76 chars (via `openssl base64`, fallback `base64 | tr | fold`).
+  - `mailx` / `mail` path: one `-a FILE` per attachment (works on macOS `mail`, BSD `mailx`, s-nail; on GNU mailutils the send fails and the warning suggests installing `msmtp`/`sendmail`).
+  - Missing artefacts (e.g. sidecar not yet written) are silently skipped — the mail still goes out with whatever exists.
+
+### Security / privacy
+
+- **Expanded data-protection surface**: attaching the full report means the configured MTA, its outbound relay, and the recipient mailbox are now part of the GDPR Art. 32(1)(a) responsibility. Document this when enabling `--notify-email` in production. Previously only metadata was transmitted.
+
 ## [2.1.0] — 2026-05-19 — First public release
 
 ### Added

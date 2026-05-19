@@ -14,7 +14,7 @@ It is a **scanner**, not an EDR. It detects known IOCs, hardens file permissions
 - **Tamper-evident report**: SHA-256 fingerprint appended inline + sidecar `.sha256` (mode 600).
 - **JSON sidecar** for SIEM/Splunk/ELK/Wazuh ingestion.
 - **Right to erasure** (`--purge`) — drops all reports + quarantine on operator confirmation.
-- **Optional incident email** (`--notify-email <addr>` or `SEC_SCAN_NOTIFY_EMAIL` env) via `mailx`/`mail`/`msmtp`/`sendmail`.
+- **Optional incident email with attachments** (`--notify-email <addr>` or `SEC_SCAN_NOTIFY_EMAIL` env) via `mailx`/`mail`/`msmtp`/`sendmail` — markdown report, JSON sidecar, and SHA-256 fingerprint are attached to the message.
 - **90-day retention auto-enforce** (configurable via `SEC_SCAN_RETENTION_DAYS`).
 
 ## Install
@@ -62,6 +62,32 @@ SEC_SCAN_IOC_SHA256=abc123... ./sec-scan.sh
 # Skip live IOC fetch (offline scan against static list only).
 ./sec-scan.sh --no-live-ioc
 ```
+
+## Email notification
+
+When `--notify-email <addr>` or `SEC_SCAN_NOTIFY_EMAIL` is set, the scanner sends a summary mail at the end of the run with **three attachments**:
+
+| Attachment | MIME type |
+|---|---|
+| `scan-report_<ts>.md` | `text/markdown` |
+| `scan-report_<ts>.json` | `application/json` |
+| `scan-report_<ts>.sha256` | `text/plain` |
+
+Transport auto-detection (in order): `mailx` → `mail` → `msmtp` → `sendmail`. If none is installed the mail step is skipped with a warning — the scan itself never fails because of mail.
+
+**MTA compatibility**
+
+| MTA | Attachment support | Notes |
+|---|---|---|
+| `msmtp -t` / `sendmail -t` | ✅ Full `multipart/mixed` MIME (RFC 2045, base64 ≤76 chars/line) | Recommended for production. |
+| macOS `mail` / BSD `mailx` / s-nail | ✅ `-a FILE` per attachment | Works out of the box on macOS. |
+| GNU mailutils `mail` (Debian/Ubuntu) | ❌ `-a` is repurposed for headers | Install `msmtp` or `sendmail` for reliable attachments. |
+
+**Privacy implications**
+
+Attaching the full report transmits operational security data — including the (pseudonymised) machine ID, scan findings, redacted matching lines from shell-rc/crontab, and IOC hits — across whatever MTA chain you have configured. Once the mail leaves the host, recipient mailbox security and transport encryption are the controller's responsibility under GDPR Art. 32(1)(a). Do not enable `--notify-email` against untrusted relays or shared inboxes.
+
+If you only want the host-local artefacts and no outbound mail, simply omit the flag.
 
 ## Output
 

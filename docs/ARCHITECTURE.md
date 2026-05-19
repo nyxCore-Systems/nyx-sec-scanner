@@ -101,7 +101,7 @@ It does **not** assume kernel-level rootkits, hypervisor compromise, or attacker
 |---|---|---|
 | `~/.dev-security/` | Report (md/json/sha256) — mode 600 | Local FS confidentiality (no encryption-at-rest beyond OS) |
 | `~/.sec-scan-quarantine/` | Moved suspicious files | Local FS; operator inspects before deletion |
-| Optional `--notify-email` recipient | Summary metadata (machineId, finding counts, file paths) | Operator's MTA + recipient inbox security |
+| Optional `--notify-email` recipient | Summary metadata + **attached** markdown report, JSON sidecar, SHA-256 fingerprint (multipart/mixed for sendmail/msmtp; `-a` per file for mailx/mail) | Operator's MTA + outbound relay + recipient inbox security. Attaching the full report widens the GDPR Art. 32(1)(a) surface — do not enable against untrusted relays. |
 
 ---
 
@@ -149,4 +149,4 @@ Contributions: open a PR. CI runs `shellcheck` and `bash -n`.
 
 ---
 
-_Reviewed for nyx-sec-scanner v2.1.0._
+_Reviewed for nyx-sec-scanner v2.1.1._

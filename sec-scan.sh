@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-VERSION="2.1.0"
+VERSION="2.1.1"
 SCAN_MODE="fix"           # fix | dry-run | quarantine
 PROJECT_ARG=""
 INCLUDE_IDENTITY=0        # 1 = log raw hostname/user/keyfile-names (opt-in)
@@ -1313,21 +1313,66 @@ if [[ -n "$NOTIFY_EMAIL" ]]; then
       printf 'Lawful basis: GDPR Art. 6(1)(f) — legitimate interest.\n'
       printf 'This email contains operational security data. Treat as confidential.\n'
     )
+    # Attachments: the operator-facing report, the SIEM-facing JSON, and the
+    # tamper-evidence sidecar. All three are 600-mode and self-contained.
+    # NOTE: this transmits the full report content across the configured MTA.
+    # GDPR Art. 32(1)(a) — recipient mailbox + transport security become part
+    # of the controller's responsibility once attachments leave this host.
+    ATTACHMENTS=()
+    for _f in "$REPORT_FILE" "$JSON_FILE" "${REPORT_FILE}.sha256"; do
+      [[ -f "$_f" ]] && ATTACHMENTS+=( "$_f" )
+    done
+
+    # Portable wrapped base64 (RFC 2045 ≤76 chars/line). openssl is ubiquitous
+    # on dev workstations; fall back to base64+fold if it isn't.
+    b64_encode() {
+      if command -v openssl >/dev/null 2>&1; then
+        openssl base64 < "$1"
+      else
+        base64 < "$1" | tr -d '\n' | fold -w 76
+      fi
+    }
+
     case "$MAILER" in
       mailx|mail)
-        printf '%s\n' "$BODY" | "$MAILER" -s "$SUBJECT" "$NOTIFY_EMAIL" 2>/dev/null && \
-          ok "Notification email sent to ${NOTIFY_EMAIL}" || \
-          warn "Email send failed (MTA returned non-zero)" ;;
-      msmtp)
-        { printf 'To: %s\nSubject: %s\n\n%s\n' "$NOTIFY_EMAIL" "$SUBJECT" "$BODY"; } \
-          | msmtp -t 2>/dev/null && \
-          ok "Notification email sent via msmtp to ${NOTIFY_EMAIL}" || \
-          warn "msmtp send failed" ;;
-      sendmail)
-        { printf 'To: %s\nSubject: %s\n\n%s\n' "$NOTIFY_EMAIL" "$SUBJECT" "$BODY"; } \
-          | sendmail -t 2>/dev/null && \
-          ok "Notification email sent via sendmail to ${NOTIFY_EMAIL}" || \
-          warn "sendmail send failed" ;;
+        # BSD/macOS mailx and s-nail accept "-a FILE" per attachment. GNU
+        # mailutils' `mail` repurposes `-a` for headers — on that platform
+        # the send fails and we fall through to the warn below; operator
+        # should install msmtp or sendmail for reliable attachments.
+        MAIL_ARGS=( -s "$SUBJECT" )
+        for _f in "${ATTACHMENTS[@]}"; do MAIL_ARGS+=( -a "$_f" ); done
+        MAIL_ARGS+=( "$NOTIFY_EMAIL" )
+        printf '%s\n' "$BODY" | "$MAILER" "${MAIL_ARGS[@]}" 2>/dev/null && \
+          ok "Notification email sent to ${NOTIFY_EMAIL} with ${#ATTACHMENTS[@]} attachment(s)" || \
+          warn "Email send failed (MTA returned non-zero). If GNU mailutils is in use, '-a' differs — install msmtp/sendmail for reliable attachments." ;;
+      msmtp|sendmail)
+        BOUNDARY="nyx-sec-scanner-$(date +%s)-$$"
+        {
+          printf 'To: %s\n' "$NOTIFY_EMAIL"
+          printf 'Subject: %s\n' "$SUBJECT"
+          printf 'MIME-Version: 1.0\n'
+          printf 'Content-Type: multipart/mixed; boundary="%s"\n\n' "$BOUNDARY"
+          printf -- '--%s\n' "$BOUNDARY"
+          printf 'Content-Type: text/plain; charset=UTF-8\n'
+          printf 'Content-Transfer-Encoding: 8bit\n\n'
+          printf '%s\n' "$BODY"
+          for _f in "${ATTACHMENTS[@]}"; do
+            _fname=$(basename "$_f")
+            case "$_f" in
+              *.json)   _ctype="application/json" ;;
+              *.sha256) _ctype="text/plain" ;;
+              *)        _ctype="text/markdown" ;;
+            esac
+            printf -- '\n--%s\n' "$BOUNDARY"
+            printf 'Content-Type: %s; name="%s"\n' "$_ctype" "$_fname"
+            printf 'Content-Transfer-Encoding: base64\n'
+            printf 'Content-Disposition: attachment; filename="%s"\n\n' "$_fname"
+            b64_encode "$_f"
+          done
+          printf -- '\n--%s--\n' "$BOUNDARY"
+        } | "$MAILER" -t 2>/dev/null && \
+          ok "Notification email sent via ${MAILER} to ${NOTIFY_EMAIL} with ${#ATTACHMENTS[@]} attachment(s)" || \
+          warn "${MAILER} send failed" ;;
     esac
   fi
 fi
