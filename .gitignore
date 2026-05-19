@@ -1,0 +1,12 @@
+# Letter-to-my-future-self / blog pipeline (session-local tooling, not project artefacts)
+.memory/
+.github/scripts/blog_gen.py
+.github/scripts/vibe_requirements.txt
+.github/workflows/vibe_publisher.yml
+drafts/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
