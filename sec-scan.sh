@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-VERSION="2.1.1"
+VERSION="2.1.2"
 SCAN_MODE="fix"           # fix | dry-run | quarantine
 PROJECT_ARG=""
 INCLUDE_IDENTITY=0        # 1 = log raw hostname/user/keyfile-names (opt-in)
@@ -89,6 +89,15 @@ ISSUES_FIXED=0
 MANUAL_ACTIONS=0
 WORM_HITS=0
 QUARANTINED=0
+NONBLOCKING_ISSUES=0     # npm audit moderate/low — flagged but not blocking
+
+# Per-section manual-action ledger. `section()` (below) automatically records
+# how many MANUAL_ACTIONS each section contributed, so the summary footer can
+# point the operator at the specific sections that need attention instead of
+# emitting a bare count.
+MA_SECTIONS=()
+_MA_SECTION_NAME=""
+_MA_BASELINE=0
 
 bump() { eval "$1=\$((${1} + 1))"; }
 
@@ -104,7 +113,18 @@ log()     { printf '%s[•]%s %s\n' "$BLUE"   "$RESET" "$*"; }
 ok()      { printf '%s[✓]%s %s\n' "$GREEN"  "$RESET" "$*"; }
 warn()    { printf '%s[!]%s %s\n' "$ORANGE" "$RESET" "$*"; }
 err()     { printf '%s[✗]%s %s\n' "$RED"    "$RESET" "$*"; }
-section() { printf '\n%s═══ %s ═══%s\n' "$BOLD" "$*" "$RESET"; }
+section() {
+  # Close out the previous section's MANUAL_ACTIONS delta before announcing
+  # the next. This lets the summary footer say "§ 4 npm Audit: 1, § 6 .env: 2"
+  # without each callsite having to label itself.
+  if [[ -n "$_MA_SECTION_NAME" ]]; then
+    local _delta=$((MANUAL_ACTIONS - _MA_BASELINE))
+    [[ $_delta -gt 0 ]] && MA_SECTIONS+=("§ ${_MA_SECTION_NAME} — ${_delta} item(s)")
+  fi
+  _MA_SECTION_NAME="$*"
+  _MA_BASELINE=$MANUAL_ACTIONS
+  printf '\n%s═══ %s ═══%s\n' "$BOLD" "$*" "$RESET"
+}
 rep()     { printf '%s\n' "$*" >> "$REPORT_FILE"; }
 
 # Relativize a path to ~/ so the operator's username does not appear in the
@@ -775,8 +795,10 @@ if [[ "$NPM_AVAILABLE" == true ]]; then
     rep ""
 
     BLOCKING=$((CRITICAL + HIGH))
+    NONBLOCKING_ISSUES=$((NONBLOCKING_ISSUES + MODERATE + LOW))   # tally regardless of branch
     if [[ "$BLOCKING" -gt 0 ]]; then
       err "${CRITICAL} critical + ${HIGH} high vulnerabilities."
+      [[ "$((MODERATE + LOW))" -gt 0 ]] && warn "Plus ${MODERATE} moderate + ${LOW} low (non-blocking, surfaced in summary)."
       bump ISSUES_FOUND
       ISSUES_FOUND=$((ISSUES_FOUND + BLOCKING - 1))   # already bumped once
 
@@ -804,6 +826,20 @@ if [[ "$NPM_AVAILABLE" == true ]]; then
         else
           err "npm audit fix failed — see /tmp/audit-fix-output.txt"
           rep "**❌ auto-fix failed.** Manual review required."
+          # Embed the last 30 lines of npm's own output so the operator can
+          # diagnose without leaving the report (peer-dep conflicts, --force
+          # required, registry unreachable, etc.). Redact long token-like
+          # substrings to keep accidental auth headers out of the report.
+          if [[ -s /tmp/audit-fix-output.txt ]]; then
+            rep ""
+            rep "<details><summary>npm audit fix output — last 30 lines (redacted)</summary>"
+            rep ""
+            rep '```'
+            tail -n 30 /tmp/audit-fix-output.txt | rep_redact >> "$REPORT_FILE"
+            rep '```'
+            rep ""
+            rep "</details>"
+          fi
           bump MANUAL_ACTIONS
         fi
       else
@@ -1159,6 +1195,13 @@ rep ""
 section "10 · Summary"
 # ============================================================
 
+# Flush the last section's manual-action delta before rendering the summary,
+# so § 9 (the section before this one) gets attributed correctly.
+if [[ -n "$_MA_SECTION_NAME" ]]; then
+  _delta=$((MANUAL_ACTIONS - _MA_BASELINE))
+  [[ $_delta -gt 0 ]] && MA_SECTIONS+=("§ ${_MA_SECTION_NAME} — ${_delta} item(s)")
+fi
+
 rep "---"
 rep ""
 rep "## Summary"
@@ -1166,7 +1209,10 @@ rep ""
 rep "| Category | Value |"
 rep "|----------|-------|"
 rep "| **Mode** | ${SCAN_MODE} |"
-rep "| **Issues found** | ${ISSUES_FOUND} |"
+rep "| **Blocking issues** | ${ISSUES_FOUND} (npm critical + high; counted as findings) |"
+if [[ "$NONBLOCKING_ISSUES" -gt 0 ]]; then
+  rep "| **Non-blocking** | ${NONBLOCKING_ISSUES} (npm moderate + low; review at next major update) |"
+fi
 rep "| **Auto-fixed** | ${ISSUES_FIXED} |"
 rep "| **Worm IOC hits** | ${WORM_HITS} |"
 rep "| **Quarantined** | ${QUARANTINED} |"
@@ -1188,7 +1234,16 @@ fi
 
 if [[ "$MANUAL_ACTIONS" -gt 0 ]]; then
   rep "### Manual actions required: ${MANUAL_ACTIONS}"
-  rep "Review the report sections above for the specific items flagged."
+  rep ""
+  if [[ "${#MA_SECTIONS[@]}" -gt 0 ]]; then
+    rep "Contributing sections:"
+    rep ""
+    for _entry in "${MA_SECTIONS[@]}"; do
+      rep "- ${_entry}"
+    done
+    rep ""
+  fi
+  rep "Open the report sections above for the specific items flagged."
   rep ""
 fi
 
@@ -1211,11 +1266,22 @@ printf '\n%s╔═════════════════════�
 printf '%s║   Scan complete                        ║%s\n' "$BOLD" "$RESET"
 printf '%s╠════════════════════════════════════════╣%s\n' "$BOLD" "$RESET"
 printf '%s║%s Mode:     %-30s%s║%s\n' "$BOLD" "$RESET" "$SCAN_MODE" "$BOLD" "$RESET"
-printf '%s║%s Found:    %-30s%s║%s\n' "$BOLD" "$RESET" "$ISSUES_FOUND issue(s)" "$BOLD" "$RESET"
+if [[ "$NONBLOCKING_ISSUES" -gt 0 ]]; then
+  printf '%s║%s Found:    %-30s%s║%s\n' "$BOLD" "$RESET" "${ISSUES_FOUND} blocking, ${NONBLOCKING_ISSUES} non-block." "$BOLD" "$RESET"
+else
+  printf '%s║%s Found:    %-30s%s║%s\n' "$BOLD" "$RESET" "${ISSUES_FOUND} issue(s)" "$BOLD" "$RESET"
+fi
 printf '%s║%s Fixed:    %s%-30s%s%s║%s\n' "$BOLD" "$RESET" "$GREEN" "${ISSUES_FIXED} auto" "$RESET" "$BOLD" "$RESET"
 printf '%s║%s Worm IOC: %s%-30s%s%s║%s\n' "$BOLD" "$RESET" "$RED" "${WORM_HITS} hit(s)" "$RESET" "$BOLD" "$RESET"
 printf '%s║%s Manual:   %-30s%s║%s\n' "$BOLD" "$RESET" "${MANUAL_ACTIONS} action(s)" "$BOLD" "$RESET"
 printf '%s╚════════════════════════════════════════╝%s\n' "$BOLD" "$RESET"
+# If specific sections drove the manual-action count, surface them inline
+# so the operator doesn't have to scroll the full report.
+if [[ "${#MA_SECTIONS[@]}" -gt 0 ]]; then
+  for _entry in "${MA_SECTIONS[@]}"; do
+    printf '  %s↳%s %s\n' "$ORANGE" "$RESET" "$_entry"
+  done
+fi
 
 if [[ "$WORM_HITS" -gt 0 ]]; then
   err "Worm IOC hits — rotate ALL credentials reachable from this machine."
@@ -1246,6 +1312,7 @@ SCAN_ID=$(uuidgen 2>/dev/null || printf '%s-%s' "$(date +%s)" "$RANDOM")
   printf '  "mode": "%s",\n' "$SCAN_MODE"
   printf '  "retentionDays": %d,\n' "$RETENTION_DAYS"
   printf '  "issuesFound": %d,\n' "$ISSUES_FOUND"
+  printf '  "nonBlockingIssues": %d,\n' "$NONBLOCKING_ISSUES"
   printf '  "issuesFixed": %d,\n' "$ISSUES_FIXED"
   printf '  "wormHits": %d,\n' "$WORM_HITS"
   printf '  "quarantined": %d,\n' "$QUARANTINED"

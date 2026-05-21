@@ -149,4 +149,4 @@ Contributions: open a PR. CI runs `shellcheck` and `bash -n`.
 
 ---
 
-_Reviewed for nyx-sec-scanner v2.1.1._
+_Reviewed for nyx-sec-scanner v2.1.2._

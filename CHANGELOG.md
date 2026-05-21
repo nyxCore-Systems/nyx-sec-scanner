@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.2] — 2026-05-21
+
+### Changed
+
+- **Summary now distinguishes blocking from non-blocking findings.** Previous releases counted only npm critical+high as "Issues found" while silently dropping moderate+low into a one-line warning — operators reasonably read this as "the scanner sees fewer vulns than `npm audit`". The terminal box and the report's Summary table now show both numbers (`Found: 15 blocking, 28 non-block.` + a separate `Non-blocking` row in the markdown table). Exit-code contract unchanged.
+- **`Manual actions required` now lists the contributing sections** instead of just emitting a bare count. Implemented by overloading `section()` to snapshot the `MANUAL_ACTIONS` delta on each section boundary — no per-callsite churn. Terminal output adds inline `↳ § 6 · .env security check — 2 item(s)` pointers under the summary box; report adds a `Contributing sections:` bullet list before the existing "Open the report sections above" pointer.
+
+### Added
+
+- **`npm audit fix` output is now embedded in the report when auto-fix fails.** Last 30 lines from `/tmp/audit-fix-output.txt` are pulled into a collapsible `<details>` block in § 4, redacted via `rep_redact` so accidental auth headers / long tokens don't reach the report. Operators can now diagnose peer-dep conflicts, `--force`-required prompts, or registry unreachability without leaving the report.
+- **JSON sidecar**: new `nonBlockingIssues` field for SIEM consumers that want the moderate+low count separately from `issuesFound`.
+
 ## [2.1.1] — 2026-05-19
 
 ### Added
