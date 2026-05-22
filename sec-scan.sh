@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-VERSION="2.1.2"
+VERSION="2.2.0"
 SCAN_MODE="fix"           # fix | dry-run | quarantine
 PROJECT_ARG=""
 INCLUDE_IDENTITY=0        # 1 = log raw hostname/user/keyfile-names (opt-in)
@@ -290,10 +290,14 @@ rep "## 1. Project directory"
 rep ""
 
 if [[ -z "$PROJECT_ROOT" ]]; then
-  warn "No package.json found — npm-specific checks will be skipped."
-  rep "- No \`package.json\` found in \`$(pwd)\` or ancestors. npm checks skipped."
+  warn "No package.json found — package-manager checks will be skipped."
+  rep "- No \`package.json\` found in \`$(pwd)\` or ancestors. PM checks skipped."
   rep ""
   NPM_AVAILABLE=false
+  PKG_MANAGER="none"
+  PM_LOCKFILE=""
+  PM_AUDIT_CMD=""
+  PM_AUDIT_FIX_CMD=""
 else
   ok "Project root: $PROJECT_ROOT"
   PKG_INFO="unknown"
@@ -303,6 +307,54 @@ else
   log "package.json: $PKG_INFO"
   rep "- **Path:** \`$(rep_path "${PROJECT_ROOT}")\`"
   rep "- **Package:** ${PKG_INFO}"
+
+  # ── Detect package manager ────────────────────────────────────
+  # Precedence: explicit env override → lockfile presence → package.json
+  # `packageManager` field → npm (legacy default).
+  # If both lockfiles are present we trust pnpm — that's the common
+  # "migrating away from npm" transitional state and pnpm-lock is what
+  # the team is now committing.
+  PM_OVERRIDE="${SEC_SCAN_PM:-auto}"
+  if [[ "$PM_OVERRIDE" != "auto" ]]; then
+    PKG_MANAGER="$PM_OVERRIDE"
+  elif [[ -f "${PROJECT_ROOT}/pnpm-lock.yaml" ]]; then
+    PKG_MANAGER="pnpm"
+    [[ -f "${PROJECT_ROOT}/package-lock.json" ]] && warn "Both pnpm-lock.yaml and package-lock.json present — using pnpm. Delete package-lock.json after the migration to avoid drift."
+  elif [[ -f "${PROJECT_ROOT}/package-lock.json" ]]; then
+    PKG_MANAGER="npm"
+  elif command -v jq >/dev/null 2>&1; then
+    PM_FIELD=$(jq -r '.packageManager // empty' "${PROJECT_ROOT}/package.json" 2>/dev/null)
+    case "$PM_FIELD" in
+      pnpm@*) PKG_MANAGER="pnpm" ;;
+      yarn@*) PKG_MANAGER="yarn" ;;  # detected but unsupported below
+      *)      PKG_MANAGER="npm"  ;;
+    esac
+  else
+    PKG_MANAGER="npm"
+  fi
+
+  case "$PKG_MANAGER" in
+    npm)
+      PM_LOCKFILE="package-lock.json"
+      PM_AUDIT_CMD="npm audit --json"
+      PM_AUDIT_FIX_CMD="npm audit fix --omit=dev"
+      ;;
+    pnpm)
+      PM_LOCKFILE="pnpm-lock.yaml"
+      PM_AUDIT_CMD="pnpm audit --json"
+      PM_AUDIT_FIX_CMD="pnpm audit --fix --prod"
+      ;;
+    yarn)
+      warn "yarn detected but not yet supported by sec-scan.sh — falling through to npm-style checks (likely incomplete)."
+      PKG_MANAGER="npm"
+      PM_LOCKFILE="package-lock.json"
+      PM_AUDIT_CMD="npm audit --json"
+      PM_AUDIT_FIX_CMD="npm audit fix --omit=dev"
+      ;;
+  esac
+
+  log "Package manager: ${PKG_MANAGER} (lockfile: ${PM_LOCKFILE})"
+  rep "- **Package manager:** \`${PKG_MANAGER}\` (lockfile: \`${PM_LOCKFILE}\`)"
   rep ""
   NPM_AVAILABLE=true
 fi
@@ -330,16 +382,41 @@ check_tool() {
 
 check_tool "node"   "node --version"
 check_tool "npm"    "npm --version"
+# pnpm is optional — only required when scanning a pnpm project. Shown as
+# "not installed" (not "❌") when absent so the audit row isn't alarming
+# for npm-only operators.
+if command -v pnpm >/dev/null 2>&1; then
+  check_tool "pnpm" "pnpm --version"
+else
+  rep "| \`pnpm\` | — | ⓘ not installed (only needed for pnpm projects) |"
+fi
 check_tool "git"    "git --version"
 check_tool "docker" "docker --version"
 check_tool "jq"     "jq --version"
 rep ""
 
+# Resolve the right CLI to use for `config get registry`. Both npm and pnpm
+# read `.npmrc`, but if only one of the two CLIs is installed we use that
+# one. Falls back to npm if both are missing (the abort path will fire
+# correctly because the registry will be detected as "unknown").
+pm_registry_cli() {
+  if [[ "$PKG_MANAGER" == "pnpm" ]] && command -v pnpm >/dev/null 2>&1; then
+    echo "pnpm"
+  elif command -v npm >/dev/null 2>&1; then
+    echo "npm"
+  elif command -v pnpm >/dev/null 2>&1; then
+    echo "pnpm"
+  else
+    echo ""
+  fi
+}
+
 # ── 2b · Early registry hijack check (BLOCKER per Nemesis) ──
 # Must run BEFORE any `npm audit fix` or install command, otherwise a
 # hijacked registry would silently feed us backdoored "fixes".
-if command -v npm >/dev/null 2>&1; then
-  EARLY_REGISTRY=$(npm config get registry 2>/dev/null || echo "unknown")
+REG_CLI=$(pm_registry_cli)
+if [[ -n "$REG_CLI" ]]; then
+  EARLY_REGISTRY=$("$REG_CLI" config get registry 2>/dev/null || echo "unknown")
   if [[ "$EARLY_REGISTRY" != "https://registry.npmjs.org/" ]]; then
     err "ABORT: active npm registry is '${EARLY_REGISTRY}' — not the default."
     err "An attacker-controlled registry would poison any auto-fix step."
@@ -612,34 +689,73 @@ for ioc in "${COMPROMISED[@]}"; do
   fi
 done
 
-if [[ "$NPM_AVAILABLE" == true ]] && [[ -f "${PROJECT_ROOT}/package-lock.json" ]]; then
-  log "Cross-checking package-lock.json against ${#COMPROMISED[@]} known IOC entries..."
+LOCK_PATH="${PROJECT_ROOT}/${PM_LOCKFILE}"
+if [[ "$NPM_AVAILABLE" == true ]] && [[ -n "$PM_LOCKFILE" ]] && [[ -f "$LOCK_PATH" ]]; then
+  log "Cross-checking ${PM_LOCKFILE} (${PKG_MANAGER}) against ${#COMPROMISED[@]} known IOC entries..."
 
-  LOCK_HITS=$(node -e '
-    const fs = require("fs");
-    const lock = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-    const iocs = process.argv.slice(2).map(s => {
-      const [n, v] = s.split("@").length === 3
-        ? [s.slice(0, s.lastIndexOf("@")), s.split("@").pop()]
-        : ["@" + s.split("@")[1], s.split("@")[2]];
-      return { name: n, version: v };
-    });
-    const pkgs = lock.packages || {};
-    const hits = [];
-    for (const [path, meta] of Object.entries(pkgs)) {
-      const name = (path.replace(/^node_modules\//, "") || "").split("/node_modules/").pop();
-      if (!name) continue;
-      const version = meta.version || "";
-      for (const ioc of iocs) {
-        if (ioc.name === name && (ioc.version === "*" || ioc.version === version)) {
-          hits.push(`${name}@${version} (at ${path})`);
+  if [[ "$PKG_MANAGER" == "pnpm" ]]; then
+    # pnpm-lock.yaml has a `packages:` section whose keys encode name@version:
+    #   /pkg@1.2.3:
+    #   /pkg@1.2.3(peer@x):
+    #   '/pkg@1.2.3':
+    #   /@scope/pkg@1.2.3:
+    #   '@scope/pkg@1.2.3':       (lockfile v9)
+    # We extract (name, version) from those keys without needing a YAML parser
+    # (avoids depending on yq) and match the same IOC schema as the npm path.
+    LOCK_HITS=$(node -e '
+      const fs = require("fs");
+      const content = fs.readFileSync(process.argv[1], "utf8");
+      const iocs = process.argv.slice(2).map(s => {
+        const at = s.lastIndexOf("@");
+        return { name: s.slice(0, at), version: s.slice(at + 1) };
+      });
+      const hits = new Set();
+      let inPkgs = false;
+      for (const raw of content.split("\n")) {
+        if (/^packages:\s*$/.test(raw)) { inPkgs = true; continue; }
+        if (inPkgs && /^[A-Za-z]/.test(raw)) { inPkgs = false; continue; }
+        if (!inPkgs) continue;
+        // Match optional leading whitespace, optional single quote, optional /,
+        // capture name (may start with @), then @, then version up to the
+        // first separator (paren / colon / quote / whitespace).
+        const m = raw.match(/^\s+'\''?\/?(@?[A-Za-z0-9_.\/-]+?)@([^()'\''":\s]+)/);
+        if (!m) continue;
+        const [, name, version] = m;
+        for (const ioc of iocs) {
+          if (ioc.name === name && (ioc.version === "*" || ioc.version === version)) {
+            hits.add(`${name}@${version}`);
+          }
         }
       }
-    }
-    if (hits.length === 0) process.exit(0);
-    for (const h of hits) console.log(h);
-    process.exit(0);
-  ' "${PROJECT_ROOT}/package-lock.json" "${COMPROMISED[@]}" 2>/dev/null || true)
+      for (const h of hits) console.log(h);
+    ' "$LOCK_PATH" "${COMPROMISED[@]}" 2>/dev/null || true)
+  else
+    LOCK_HITS=$(node -e '
+      const fs = require("fs");
+      const lock = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      const iocs = process.argv.slice(2).map(s => {
+        const [n, v] = s.split("@").length === 3
+          ? [s.slice(0, s.lastIndexOf("@")), s.split("@").pop()]
+          : ["@" + s.split("@")[1], s.split("@")[2]];
+        return { name: n, version: v };
+      });
+      const pkgs = lock.packages || {};
+      const hits = [];
+      for (const [path, meta] of Object.entries(pkgs)) {
+        const name = (path.replace(/^node_modules\//, "") || "").split("/node_modules/").pop();
+        if (!name) continue;
+        const version = meta.version || "";
+        for (const ioc of iocs) {
+          if (ioc.name === name && (ioc.version === "*" || ioc.version === version)) {
+            hits.push(`${name}@${version} (at ${path})`);
+          }
+        }
+      }
+      if (hits.length === 0) process.exit(0);
+      for (const h of hits) console.log(h);
+      process.exit(0);
+    ' "$LOCK_PATH" "${COMPROMISED[@]}" 2>/dev/null || true)
+  fi
 
   if [[ -n "$LOCK_HITS" ]]; then
     err "COMPROMISED PACKAGE DETECTED in lockfile:"
@@ -651,14 +767,14 @@ if [[ "$NPM_AVAILABLE" == true ]] && [[ -f "${PROJECT_ROOT}/package-lock.json" ]
       bump MANUAL_ACTIONS
     done <<< "$LOCK_HITS"
     rep ""
-    rep "**Required action:** pin to a known-good version, delete \`node_modules\` + \`package-lock.json\`, re-install. Then ROTATE every secret accessible from the dev machine (npm tokens, AWS keys, .env values) — the worm exfiltrates whatever it can read."
+    rep "**Required action:** pin to a known-good version, delete \`node_modules\` + \`${PM_LOCKFILE}\`, re-install via \`${PKG_MANAGER} install\`. Then ROTATE every secret accessible from the dev machine (npm tokens, AWS keys, .env values) — the worm exfiltrates whatever it can read."
     rep ""
   else
     ok "No known-compromised package versions in lockfile."
-    rep "- ✅ Lockfile clean of known IOCs (${#COMPROMISED[@]} entries checked)."
+    rep "- ✅ Lockfile clean of known IOCs (${#COMPROMISED[@]} entries checked, ${PM_LOCKFILE})."
   fi
 else
-  rep "- _Lockfile IOC check skipped — no package-lock.json._"
+  rep "- _Lockfile IOC check skipped — no \`${PM_LOCKFILE:-lockfile}\`._"
 fi
 rep ""
 
@@ -772,16 +888,16 @@ parse_audit() {
   ' 2>/dev/null
 }
 
-if [[ "$NPM_AVAILABLE" == true ]]; then
+if [[ "$NPM_AVAILABLE" == true ]] && [[ -n "$PM_AUDIT_CMD" ]] && command -v "$PKG_MANAGER" >/dev/null 2>&1; then
   cd "$PROJECT_ROOT"
 
   if [[ ! -d "node_modules" ]]; then
-    warn "node_modules missing — run npm ci first."
+    warn "node_modules missing — run \`${PKG_MANAGER} install\` first."
     rep "**⚠️ node_modules not found** — audit skipped."
     bump ISSUES_FOUND
   else
-    log "Running npm audit..."
-    AUDIT_JSON=$(npm audit --json 2>/dev/null || true)
+    log "Running ${PM_AUDIT_CMD}..."
+    AUDIT_JSON=$(eval "$PM_AUDIT_CMD" 2>/dev/null || true)
     read -r CRITICAL HIGH MODERATE LOW < <(printf '%s' "$AUDIT_JSON" | parse_audit)
 
     rep "### Result before fix"
@@ -803,9 +919,9 @@ if [[ "$NPM_AVAILABLE" == true ]]; then
       ISSUES_FOUND=$((ISSUES_FOUND + BLOCKING - 1))   # already bumped once
 
       if [[ "$SCAN_MODE" != "dry-run" ]]; then
-        log "Attempting safe auto-fix (npm audit fix --omit=dev)..."
-        if npm audit fix --omit=dev 2>&1 | tee /tmp/audit-fix-output.txt >/dev/null; then
-          read -r CA HA _ _ < <(npm audit --json 2>/dev/null | parse_audit)
+        log "Attempting safe auto-fix (${PM_AUDIT_FIX_CMD})..."
+        if eval "$PM_AUDIT_FIX_CMD" 2>&1 | tee /tmp/audit-fix-output.txt >/dev/null; then
+          read -r CA HA _ _ < <(eval "$PM_AUDIT_CMD" 2>/dev/null | parse_audit)
           REMAINING=$((CA + HA))
           rep "### Result after auto-fix"
           rep ""
@@ -824,8 +940,8 @@ if [[ "$NPM_AVAILABLE" == true ]]; then
             ISSUES_FIXED=$((ISSUES_FIXED + BLOCKING))
           fi
         else
-          err "npm audit fix failed — see /tmp/audit-fix-output.txt"
-          rep "**❌ auto-fix failed.** Manual review required."
+          err "${PKG_MANAGER} audit fix failed — see /tmp/audit-fix-output.txt"
+          rep "**❌ auto-fix failed (\`${PM_AUDIT_FIX_CMD}\`).** Manual review required."
           # Embed the last 30 lines of npm's own output so the operator can
           # diagnose without leaving the report (peer-dep conflicts, --force
           # required, registry unreachable, etc.). Redact long token-like
@@ -1143,10 +1259,11 @@ section "9 · npm registry & .npmrc"
 rep "## 9. npm registry & .npmrc"
 rep ""
 
-if command -v npm >/dev/null 2>&1; then
-  REGISTRY=$(npm config get registry 2>/dev/null || echo "unknown")
-  ok "Active registry: ${REGISTRY}"
-  rep "- **Registry:** \`${REGISTRY}\`"
+REG_CLI=$(pm_registry_cli)
+if [[ -n "$REG_CLI" ]]; then
+  REGISTRY=$("$REG_CLI" config get registry 2>/dev/null || echo "unknown")
+  ok "Active registry: ${REGISTRY} (via ${REG_CLI})"
+  rep "- **Registry:** \`${REGISTRY}\` _(probed via \`${REG_CLI} config get\`)_"
   if [[ "$REGISTRY" != "https://registry.npmjs.org/" ]]; then
     warn "Non-default registry — verify this is intentional"
     rep "  - ⚠️ Non-default registry. Make sure this is an intended private/mirror registry, not a hijack."
@@ -1310,6 +1427,7 @@ SCAN_ID=$(uuidgen 2>/dev/null || printf '%s-%s' "$(date +%s)" "$RANDOM")
   printf '  "machineId": "%s",\n' "$MACHINE_ID"
   printf '  "timestamp": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf '  "mode": "%s",\n' "$SCAN_MODE"
+  printf '  "packageManager": "%s",\n' "${PKG_MANAGER:-none}"
   printf '  "retentionDays": %d,\n' "$RETENTION_DAYS"
   printf '  "issuesFound": %d,\n' "$ISSUES_FOUND"
   printf '  "nonBlockingIssues": %d,\n' "$NONBLOCKING_ISSUES"

@@ -32,7 +32,7 @@ There is no test suite. CI is `bash -n` + shellcheck only. Verify behavioural ch
 | 1 | Project root discovery (walks up from `$PROJECT_ARG` or cwd looking for `package.json`) |
 | 2 | System prereqs + early registry-hijack abort |
 | 3 | Worm IOC scan: filesystem, `/tmp` staging, macOS Application Support, git hooks (per-repo + global `core.hooksPath`), `package-lock.json` cross-check, malicious workflows, shell-rc, cron/launchd |
-| 4 | `npm audit` (single Node parser, DRY) |
+| 4 | `npm audit` or `pnpm audit` — auto-detected from lockfile (`package-lock.json` → npm, `pnpm-lock.yaml` → pnpm). Override via `SEC_SCAN_PM=npm\|pnpm\|auto`. Single Node parser (both managers emit the same `metadata.vulnerabilities` shape). |
 | 5 | Postinstall hook inventory |
 | 6 | `.env` permission check |
 | 7 | Git hygiene |
@@ -43,6 +43,8 @@ There is no test suite. CI is `bash -n` + shellcheck only. Verify behavioural ch
 Helpers live at the top of the file (~lines 100–185): `log`, `ok`, `warn`, `err`, `section`, `rep`, `rep_path`, `rep_redact`, `bump`, `do_action`, `quarantine`, `check_active_worm_procs`, `file_perms`, `ioc_format_ok`. New checks should use these — `rep` writes to the markdown report, `rep_path` relativises `$HOME` → `~/`, `rep_redact` strips 20+-char token-like substrings, `bump` increments counters, and `do_action` is the central dispatch that honours `--dry-run` / `--quarantine`.
 
 Static IOC list: the `COMPROMISED[]` array (~lines 470–490). To add IOCs locally, edit this array; for fleet-wide updates, host an HTTPS feed and use `SEC_SCAN_IOC_URL` (+ optionally `SEC_SCAN_IOC_SHA256`) instead — see `docs/IOC-FEED.md`. Every entry is validated at startup via `ioc_format_ok`; a malformed entry causes exit code 4.
+
+Package-manager detection happens once in section 1 and populates `PKG_MANAGER` / `PM_LOCKFILE` / `PM_AUDIT_CMD` / `PM_AUDIT_FIX_CMD`. Sections 3b (lockfile IOC scan) and 4 (audit) branch on `PKG_MANAGER`; section 9 + 2b (registry hijack check) pick the right CLI via `pm_registry_cli()`. If you add a new package manager, that's the surface — don't sprinkle PM-specific code into the IOC list / report logic.
 
 ## Invariants that constrain every change
 

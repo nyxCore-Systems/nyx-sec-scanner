@@ -28,7 +28,7 @@ Security tooling that ships in proprietary form is harder to trust. Open-source 
 | Threat | Mechanism |
 |---|---|
 | **Shai-Hulud worm filesystem persistence** | Direct path checks for `~/Shai-Hulud*`, shallow `find` for `bundle.js` / `shai*.js`, recent `/tmp/*.sh`, macOS `~/Library/Application Support` UUID-named directories. |
-| **Compromised npm package versions in the lockfile** | Static IOC array cross-checked against `package-lock.json` via Node-level parse. Optional live feed (HTTPS+SHA-256 pinned). |
+| **Compromised npm/pnpm package versions in the lockfile** | Static IOC array cross-checked against `package-lock.json` (npm, JSON) **or** `pnpm-lock.yaml` (pnpm, YAML regex-sweep) via Node-level parse. Manager is auto-detected from lockfile presence; override with `SEC_SCAN_PM=npm\|pnpm`. Optional live feed (HTTPS+SHA-256 pinned). |
 | **Registry hijack via `.npmrc`** | Aborts the script BEFORE any `npm audit fix` if active registry is not `https://registry.npmjs.org/`. Cross-checks `_authToken` entries against the default registry host. |
 | **Malicious GitHub Actions workflow injection** | Glob match for `*shai*` / `*hulud*` in `.github/workflows/`. |
 | **Git hook persistence (per-repo + global `core.hooksPath`)** | Recursive find under `$HOME` (max-depth 4) for `post-commit`/`pre-push`/`post-checkout` hooks containing `curl|wget|shai|hulud` patterns. Plus explicit `git config --global core.hooksPath` check. |
@@ -149,4 +149,4 @@ Contributions: open a PR. CI runs `shellcheck` and `bash -n`.
 
 ---
 
-_Reviewed for nyx-sec-scanner v2.1.2._
+_Reviewed for nyx-sec-scanner v2.2.0._

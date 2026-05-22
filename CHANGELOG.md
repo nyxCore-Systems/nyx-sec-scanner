@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] — 2026-05-22
+
+### Added
+
+- **pnpm support**: scanner auto-detects `pnpm-lock.yaml` and switches the audit + lockfile-IOC scan to pnpm. Uses `pnpm audit --json` (same `metadata.vulnerabilities` shape as npm — no parser change needed) and `pnpm audit --fix --prod` for the auto-fix path.
+- **Package-manager detection** with explicit precedence: env override (`SEC_SCAN_PM=npm|pnpm|auto`) → lockfile presence (pnpm wins when both lockfiles exist, with a warning) → `packageManager` field in `package.json` → npm fallback. yarn is recognised but currently falls back to npm-style checks with a warning.
+- **pnpm-lock.yaml IOC parser** in `node` — line-scans the `packages:` section for `name@version` keys (handles legacy `/pkg@ver:`, scoped `/@scope/pkg@ver:`, lockfile-v9 `'@scope/pkg@ver':`, and peer-dep suffixed `/pkg@ver(peer@x):` forms). No yq/jq dependency.
+- **Registry probe** now uses the right CLI for the detected manager (`pnpm config get registry` for pnpm projects, `npm config get` otherwise). Falls back to whichever is installed when only one CLI is present.
+- **JSON sidecar**: new `packageManager` field (`"npm" | "pnpm" | "none"`) for SIEM consumers.
+- **Report § 1** now shows `Package manager: pnpm (lockfile: pnpm-lock.yaml)` so the audit context is unambiguous.
+
+### Changed
+
+- Section 2 prerequisites table lists `pnpm` as optional — only flagged when the project actually needs it.
+- Lockfile-clean message references the detected lockfile name instead of hardcoding `package-lock.json`.
+
 ## [2.1.2] — 2026-05-21
 
 ### Changed

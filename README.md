@@ -6,7 +6,7 @@ It is a **scanner**, not an EDR. It detects known IOCs, hardens file permissions
 
 ## Features
 
-- **Worm IOC scan**: Shai-Hulud filesystem artifacts, compromised npm package versions (static + optional live feed), tampered GitHub workflows, malicious git hooks (per-repo + global `core.hooksPath`), `/tmp` staging payloads, macOS `~/Library/Application Support` persistence, shell-rc injection patterns, suspicious crontab entries.
+- **Worm IOC scan**: Shai-Hulud filesystem artifacts, compromised npm package versions (static + optional live feed) — auto-detects **npm** (`package-lock.json`) or **pnpm** (`pnpm-lock.yaml`) projects and runs the matching audit / lockfile-scan; tampered GitHub workflows, malicious git hooks (per-repo + global `core.hooksPath`), `/tmp` staging payloads, macOS `~/Library/Application Support` persistence, shell-rc injection patterns, suspicious crontab entries.
 - **Permission hardening**: `.env`, `~/.ssh`, `~/.npmrc`, per-key (only flags + fixes deviations from `600/700`).
 - **Registry hijack check**: aborts BEFORE any `npm audit fix` if the active registry is not `https://registry.npmjs.org/`.
 - **Active-process detection**: warns when worm-like processes hold an open fd to a quarantine target.
@@ -61,7 +61,26 @@ SEC_SCAN_IOC_SHA256=abc123... ./sec-scan.sh
 
 # Skip live IOC fetch (offline scan against static list only).
 ./sec-scan.sh --no-live-ioc
+
+# Force a specific package manager (auto-detected by default from lockfile).
+SEC_SCAN_PM=pnpm ./sec-scan.sh
+SEC_SCAN_PM=npm  ./sec-scan.sh
 ```
+
+## Package-manager support
+
+Auto-detected from the project's lockfile:
+
+| Lockfile | Detected as | Audit command | Auto-fix command |
+|---|---|---|---|
+| `pnpm-lock.yaml` | `pnpm` | `pnpm audit --json` | `pnpm audit --fix --prod` |
+| `package-lock.json` | `npm` | `npm audit --json` | `npm audit fix --omit=dev` |
+| both present | `pnpm` (with warning to delete `package-lock.json`) | — | — |
+| neither | from `packageManager` field in `package.json`, else `npm` | — | — |
+
+Override with `SEC_SCAN_PM=pnpm` or `SEC_SCAN_PM=npm`. yarn is currently detected but falls back to npm-style checks (incomplete — open an issue if you need first-class yarn support).
+
+The lockfile IOC cross-check parses each format directly (no `yq`/`jq` dependency for pnpm's YAML lockfile — handled via a Node regex sweep over the `packages:` section).
 
 ## Email notification
 
